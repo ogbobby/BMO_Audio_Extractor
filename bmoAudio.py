@@ -90,7 +90,7 @@ class BMOTranscriptExtractor:
         search_name = re.sub(r'\.txt$', '', search_name)
         
         # Common video extensions
-        video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.m4v']
+        video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.m4v', '.webm']
         
         # Search in videos directory
         for ext in video_extensions:
@@ -122,14 +122,14 @@ class BMOTranscriptExtractor:
             # Find approximate position
             for i, line in enumerate(transcript_lines):
                 if dialogue in line:
-                    # Rough estimate: assume 30-minute episode with ~1000 lines
-                    # Each line ~1.8 seconds
+                    # Rough estimate: assume 22-minute episode with ~1000 lines
+                    # Each line ~1.32 seconds
                     seconds = (i / total_lines) * 22 * 60  # 22-minute episode
-                    return timedelta(seconds=seconds)
+                    return seconds  # Return as float seconds instead of timedelta
         except:
             pass
         
-        return None
+        return 0.0
     
     def extract_audio_clip(self, video_path, start_time, duration, output_path):
         """
@@ -137,16 +137,10 @@ class BMOTranscriptExtractor:
         
         Args:
             video_path: Path to video file
-            start_time: When to start extraction (timedelta or seconds)
+            start_time: When to start extraction (seconds as float)
             duration: How long to extract (seconds)
             output_path: Where to save the audio clip
         """
-        # Convert timedelta to seconds if needed
-        if isinstance(start_time, timedelta):
-            start_seconds = start_time.total_seconds()
-        else:
-            start_seconds = float(start_time)
-        
         # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -154,10 +148,10 @@ class BMOTranscriptExtractor:
         cmd = [
             'ffmpeg',
             '-i', str(video_path),
-            '-ss', str(start_seconds),
+            '-ss', str(start_time),
             '-t', str(duration),
             '-vn',  # No video
-            '-acodec', 'mp3',  # Output as MP3
+            '-acodec', 'libmp3lame',  # Output as MP3
             '-ar', '44100',  # Audio sample rate
             '-ac', '2',  # Stereo
             '-y',  # Overwrite output file
@@ -165,10 +159,13 @@ class BMOTranscriptExtractor:
         ]
         
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"FFmpeg error: {e.stderr.decode()}")
+            print(f"  FFmpeg error: {e.stderr}")
+            return False
+        except FileNotFoundError:
+            print("  Error: ffmpeg not found. Please install ffmpeg and ensure it's in your PATH")
             return False
     
     def process_all_transcripts(self):
@@ -179,7 +176,10 @@ class BMOTranscriptExtractor:
         all_bmo_lines = []
         
         # Process each transcript file
-        for transcript_file in sorted(self.transcripts_dir.rglob("*.txt")):
+        transcript_files = list(self.transcripts_dir.rglob("*.txt"))
+        print(f"Found {len(transcript_files)} transcript files")
+        
+        for transcript_file in sorted(transcript_files):
             episode_name = transcript_file.stem
             print(f"\nProcessing: {episode_name}")
             
@@ -205,25 +205,24 @@ class BMOTranscriptExtractor:
                         
                         # Create output filename
                         safe_dialogue = re.sub(r'[^\w\s-]', '', dialogue)[:50]
+                        safe_dialogue = re.sub(r'\s+', '_', safe_dialogue.strip())
                         output_filename = f"{episode_name}_BMO_{i+1:03d}_{safe_dialogue}.mp3"
                         output_path = self.output_dir / episode_name / output_filename
                         
-                        # Estimate timing (you'll need to adjust this)
-                        # For now, assume each line takes about 3 seconds
+                        # Estimate timing
                         estimated_time = self.estimate_timestamp(dialogue, full_transcript)
                         
-                        if estimated_time:
-                            # Add dialogue to tracking list
-                            dialogue_entry = {
-                                'episode': episode_name,
-                                'dialogue': dialogue,
-                                'estimated_time': str(estimated_time),
-                                'video_file': str(video_path),
-                                'output_file': str(output_path)
-                            }
-                            all_bmo_lines.append(dialogue_entry)
-                            
-                            print(f"    Line {i+1}: {dialogue[:50]}...")
+                        # Add dialogue to tracking list
+                        dialogue_entry = {
+                            'episode': episode_name,
+                            'dialogue': dialogue,
+                            'estimated_time': estimated_time,
+                            'video_file': str(video_path),
+                            'output_file': str(output_path)
+                        }
+                        all_bmo_lines.append(dialogue_entry)
+                        
+                        print(f"    Line {i+1}: {dialogue[:50]}...")
                 else:
                     print(f"  Warning: No video found for {episode_name}")
             else:
@@ -244,6 +243,44 @@ class BMOAudioExtractor(BMOTranscriptExtractor):
     Extended class that actually extracts the audio clips
     """
     
+    def parse_timestamp(self, time_str):
+        """
+        Parse various timestamp formats to seconds as float
+        
+        Args:
+            time_str: Timestamp string in various formats
+                     "HH:MM:SS.ms", "MM:SS.ms", or just seconds as string
+        
+        Returns:
+            float: Time in seconds
+        """
+        if isinstance(time_str, (int, float)):
+            return float(time_str)
+        
+        time_str = str(time_str).strip()
+        
+        try:
+            # Try to parse as simple float first
+            return float(time_str)
+        except ValueError:
+            pass
+        
+        try:
+            # Handle format like "0:00:52.367491" or "00:52.367491"
+            parts = time_str.split(':')
+            
+            if len(parts) == 3:  # HH:MM:SS.ms
+                h, m, s = parts
+                return int(h) * 3600 + int(m) * 60 + float(s)
+            elif len(parts) == 2:  # MM:SS.ms
+                m, s = parts
+                return int(m) * 60 + float(s)
+            else:
+                return 0.0
+        except (ValueError, IndexError):
+            print(f"  Warning: Could not parse timestamp '{time_str}'")
+            return 0.0
+    
     def extract_all_audio(self, manual_timing_file=None):
         """
         Extract audio for all BMO dialogues
@@ -257,12 +294,15 @@ class BMOAudioExtractor(BMOTranscriptExtractor):
         # Load manual timings if provided
         manual_timings = {}
         if manual_timing_file and os.path.exists(manual_timing_file):
-            with open(manual_timing_file, 'r') as f:
+            with open(manual_timing_file, 'r', encoding='utf-8') as f:
                 for item in json.load(f):
                     key = f"{item['episode']}_{item['dialogue'][:30]}"
                     manual_timings[key] = item['timestamp']
         
-        print("\n🎬 Extracting audio clips...")
+        print(f"\n🎬 Extracting audio clips for {len(all_dialogues)} BMO lines...")
+        
+        successful = 0
+        failed = 0
         
         for i, dialogue_data in enumerate(all_dialogues):
             episode = dialogue_data['episode']
@@ -275,141 +315,350 @@ class BMOAudioExtractor(BMOTranscriptExtractor):
             
             # Get timestamp (use manual if available, otherwise estimated)
             if lookup_key in manual_timings:
-                start_time = manual_timings[lookup_key]
-                print(f"\n[{i+1}/{len(all_dialogues)}] Using manual timing for: {dialogue[:50]}...")
+                start_time = self.parse_timestamp(manual_timings[lookup_key])
+                print(f"\n[{i+1}/{len(all_dialogues)}] Using manual timing ({start_time:.2f}s) for: {dialogue[:50]}...")
             else:
-                # Parse estimated time from string back to seconds
-                time_str = dialogue_data['estimated_time']
-                h, m, s = map(int, time_str.split(':'))
-                start_time = timedelta(hours=h, minutes=m, seconds=s)
-                print(f"\n[{i+1}/{len(all_dialogues)}] Using estimated timing for: {dialogue[:50]}...")
+                start_time = float(dialogue_data['estimated_time'])
+                print(f"\n[{i+1}/{len(all_dialogues)}] Using estimated timing ({start_time:.2f}s) for: {dialogue[:50]}...")
             
-            # Estimate duration (average speaking rate: ~150 words per minute)
+            # Estimate duration based on dialogue length
             word_count = len(dialogue.split())
-            duration = max(2, word_count * 0.4)  # Rough estimate: 0.4 seconds per word
+            # Average speaking rate: ~150 words per minute = 2.5 words per second
+            # Add 0.5 seconds buffer at start and end
+            duration = max(1.5, (word_count / 2.5) + 1.0)
+            
+            # Check if video file exists
+            if not video_path.exists():
+                print(f"  ✗ Video file not found: {video_path}")
+                failed += 1
+                continue
             
             # Extract audio
+            print(f"  Extracting {duration:.1f}s clip...")
             success = self.extract_audio_clip(
                 video_path,
                 start_time,
-                duration + 0.5,  # Add small buffer
+                duration,
                 output_path
             )
             
             if success:
                 print(f"  ✓ Saved to: {output_path}")
+                successful += 1
             else:
                 print(f"  ✗ Failed to extract audio")
+                failed += 1
         
-        print(f"\n✅ Audio extraction complete! Files saved in: {self.output_dir}")
+        print(f"\n{'='*50}")
+        print(f"✅ AUDIO EXTRACTION COMPLETE")
+        print(f"{'='*50}")
+        print(f"Successful: {successful}")
+        print(f"Failed: {failed}")
+        print(f"Total: {successful + failed}")
+        print(f"\nFiles saved in: {self.output_dir}")
 
 def create_timing_correction_tool(transcripts_dir, output_dir):
     """
     Create a helper tool for manually correcting timestamps
     """
-    html_content = """
-<!DOCTYPE html>
+    # First get all dialogues
+    extractor = BMOTranscriptExtractor(transcripts_dir, "", output_dir)
+    all_dialogues = extractor.process_all_transcripts()
+    
+    # Format dialogues for the HTML tool
+    formatted_dialogues = []
+    for d in all_dialogues:
+        # Format estimated time as MM:SS.ms
+        est_time = float(d['estimated_time'])
+        minutes = int(est_time // 60)
+        seconds = est_time % 60
+        time_str = f"{minutes:02d}:{seconds:06.3f}"
+        
+        formatted_dialogues.append({
+            'episode': d['episode'],
+            'dialogue': d['dialogue'],
+            'estimated_time': time_str
+        })
+    
+    html_content = """<!DOCTYPE html>
 <html>
 <head>
     <title>BMO Dialogue Timing Corrector</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .controls {
+            position: sticky;
+            top: 0;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            z-index: 100;
+        }
         .dialogue-item { 
-            border: 1px solid #ccc; 
+            border: 1px solid #ddd; 
             margin: 10px 0; 
             padding: 15px;
-            border-radius: 5px;
+            border-radius: 8px;
+            background-color: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
-        .dialogue-text { font-size: 16px; margin-bottom: 10px; }
+        .dialogue-text { 
+            font-size: 16px; 
+            margin-bottom: 10px;
+            color: #333;
+            font-weight: 500;
+        }
         .timestamp-input { 
-            padding: 5px;
+            padding: 8px;
             font-size: 14px;
-            width: 200px;
+            width: 120px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+        .timestamp-input:focus {
+            border-color: #4CAF50;
+            outline: none;
         }
         .save-btn {
             background-color: #4CAF50;
             color: white;
-            padding: 10px 20px;
-            margin: 20px 0;
+            padding: 12px 24px;
+            margin: 10px 5px;
             border: none;
-            border-radius: 5px;
+            border-radius: 6px;
             cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .save-btn:hover {
+            background-color: #45a049;
+        }
+        .export-btn {
+            background-color: #2196F3;
+            color: white;
+            padding: 12px 24px;
+            margin: 10px 5px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .export-btn:hover {
+            background-color: #1976D2;
         }
         .episode-header {
-            background-color: #f0f0f0;
-            padding: 10px;
-            margin: 20px 0 10px 0;
+            background-color: #e3f2fd;
+            padding: 12px;
+            margin: 30px 0 15px 0;
             font-weight: bold;
+            font-size: 18px;
+            border-radius: 6px;
+            border-left: 5px solid #2196F3;
+        }
+        .episode-header:first-of-type {
+            margin-top: 0;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status-corrected {
+            background-color: #c8e6c9;
+            color: #2e7d32;
+        }
+        .status-pending {
+            background-color: #fff3e0;
+            color: #e65100;
+        }
+        .search-box {
+            padding: 10px;
+            width: 300px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        .stats {
+            display: inline-block;
+            margin-left: 20px;
+            color: #666;
+        }
+        .copy-btn {
+            background-color: #ff9800;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        .copy-btn:hover {
+            background-color: #f57c00;
         }
     </style>
 </head>
 <body>
-    <h1>BMO Dialogue Timing Corrector</h1>
-    <p>Watch each episode and enter the timestamp (in MM:SS format) when BMO starts speaking each line.</p>
-    
-    <button class="save-btn" onclick="saveTimings()">Save All Timings</button>
-    <button class="save-btn" onclick="exportJSON()">Export as JSON</button>
-    
-    <div id="content"></div>
-    
+    <div class="container">
+        <h1>🎮 BMO Dialogue Timing Corrector</h1>
+        <p>Watch each episode and enter the timestamp (in MM:SS.ms format, e.g., "05:23.5") when BMO starts speaking.</p>
+        
+        <div class="controls">
+            <input type="text" class="search-box" id="search" placeholder="Search episodes or dialogue..." onkeyup="filterDialogues()">
+            <button class="save-btn" onclick="saveTimings()">💾 Save All Timings</button>
+            <button class="export-btn" onclick="exportJSON()">📤 Export as JSON</button>
+            <button class="export-btn" onclick="copyTimingsToClipboard()">📋 Copy to Clipboard</button>
+            <span class="stats" id="stats"></span>
+        </div>
+        
+        <div id="content"></div>
+    </div>
+
     <script>
-        let dialogues = [];
+        let dialogues = """ + json.dumps(formatted_dialogues, indent=2) + """;
+        let correctedTimings = JSON.parse(localStorage.getItem('bmoTimings') || '{}');
+        
+        function formatTime(seconds) {
+            if (!seconds) return '';
+            const minutes = Math.floor(seconds / 60);
+            const secs = (seconds % 60).toFixed(3);
+            return `${minutes.toString().padStart(2, '0')}:${secs.padStart(6, '0')}`;
+        }
+        
+        function parseTime(timeStr) {
+            if (!timeStr) return 0;
+            const parts = timeStr.split(':');
+            if (parts.length === 2) {
+                return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+            }
+            return 0;
+        }
         
         function loadDialogues() {
-            // This will be populated by the Python script
-            const dialogueData = DIALOGUE_PLACEHOLDER;
-            
             const content = document.getElementById('content');
             let currentEpisode = '';
+            let html = '';
+            let corrected = 0;
             
-            dialogueData.forEach((item, index) => {
+            dialogues.forEach((item, index) => {
+                const key = `${item.episode}_${item.dialogue.substring(0, 30)}`;
+                const correctedTime = correctedTimings[key];
+                const displayTime = correctedTime || item.estimated_time;
+                const status = correctedTime ? 'corrected' : 'pending';
+                if (correctedTime) corrected++;
+                
                 if (item.episode !== currentEpisode) {
                     currentEpisode = item.episode;
-                    const header = document.createElement('div');
-                    header.className = 'episode-header';
-                    header.textContent = currentEpisode;
-                    content.appendChild(header);
+                    html += `<div class="episode-header">${currentEpisode}</div>`;
                 }
                 
-                const div = document.createElement('div');
-                div.className = 'dialogue-item';
-                div.innerHTML = `
-                    <div class="dialogue-text">${item.dialogue}</div>
-                    <input type="text" class="timestamp-input" id="time_${index}" 
-                           placeholder="MM:SS" value="${item.estimated_time || ''}">
-                    <button onclick="playPreview(${index})">Preview</button>
+                html += `
+                    <div class="dialogue-item" data-episode="${item.episode}" data-dialogue="${item.dialogue.toLowerCase()}">
+                        <div class="dialogue-text">
+                            ${item.dialogue}
+                            <span class="status-badge status-${status}">${status === 'corrected' ? '✓ Corrected' : '⏱️ Pending'}</span>
+                        </div>
+                        <div>
+                            <input type="text" class="timestamp-input" id="time_${index}" 
+                                   placeholder="MM:SS.ms" value="${displayTime}">
+                            <button onclick="useEstimated(${index})">Use Estimated</button>
+                            <button onclick="playTimestamp(${index})">▶️ Preview (copy time)</button>
+                        </div>
+                    </div>
                 `;
-                content.appendChild(div);
             });
+            
+            content.innerHTML = html;
+            document.getElementById('stats').textContent = `📊 Corrected: ${corrected}/${dialogues.length}`;
+        }
+        
+        function useEstimated(index) {
+            document.getElementById(`time_${index}`).value = dialogues[index].estimated_time;
+        }
+        
+        function playTimestamp(index) {
+            const timeInput = document.getElementById(`time_${index}`).value;
+            const timeInSeconds = parseTime(timeInput);
+            alert(`Copy this timestamp: ${timeInput} (${timeInSeconds.toFixed(3)} seconds)`);
         }
         
         function saveTimings() {
-            const timings = [];
+            correctedTimings = {};
             dialogues.forEach((item, index) => {
                 const input = document.getElementById(`time_${index}`);
                 if (input.value) {
-                    timings.push({
-                        episode: item.episode,
-                        dialogue: item.dialogue,
-                        timestamp: input.value
-                    });
+                    const key = `${item.episode}_${item.dialogue.substring(0, 30)}`;
+                    correctedTimings[key] = input.value;
                 }
             });
             
-            localStorage.setItem('bmoTimings', JSON.stringify(timings));
-            alert('Timings saved to browser!');
+            localStorage.setItem('bmoTimings', JSON.stringify(correctedTimings));
+            loadDialogues(); // Reload to update status badges
+            alert('✅ Timings saved to browser!');
         }
         
         function exportJSON() {
-            const timings = JSON.parse(localStorage.getItem('bmoTimings') || '[]');
-            const dataStr = JSON.stringify(timings, null, 2);
+            const exportData = dialogues.map((item, index) => {
+                const key = `${item.episode}_${item.dialogue.substring(0, 30)}`;
+                return {
+                    episode: item.episode,
+                    dialogue: item.dialogue,
+                    timestamp: correctedTimings[key] || item.estimated_time
+                };
+            });
+            
+            const dataStr = JSON.stringify(exportData, null, 2);
             const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
             
-            const exportFileDefaultName = 'bmo_timings.json';
             const linkElement = document.createElement('a');
             linkElement.setAttribute('href', dataUri);
-            linkElement.setAttribute('download', exportFileDefaultName);
+            linkElement.setAttribute('download', 'bmo_timings.json');
             linkElement.click();
+        }
+        
+        function copyTimingsToClipboard() {
+            const exportData = dialogues.map((item, index) => {
+                const key = `${item.episode}_${item.dialogue.substring(0, 30)}`;
+                return {
+                    episode: item.episode,
+                    dialogue: item.dialogue,
+                    timestamp: correctedTimings[key] || item.estimated_time
+                };
+            });
+            
+            navigator.clipboard.writeText(JSON.stringify(exportData, null, 2)).then(() => {
+                alert('✅ Copied to clipboard!');
+            });
+        }
+        
+        function filterDialogues() {
+            const searchTerm = document.getElementById('search').value.toLowerCase();
+            const items = document.querySelectorAll('.dialogue-item');
+            
+            items.forEach(item => {
+                const episode = item.dataset.episode.toLowerCase();
+                const dialogue = item.dataset.dialogue;
+                if (episode.includes(searchTerm) || dialogue.includes(searchTerm)) {
+                    item.style.display = 'block';
+                } else {
+                    item.style.display = 'none';
+                }
+            });
         }
         
         // Load dialogues when page loads
@@ -419,61 +668,121 @@ def create_timing_correction_tool(transcripts_dir, output_dir):
 </html>
     """
     
-    # Get all dialogues first
-    extractor = BMOTranscriptExtractor(transcripts_dir, "", output_dir)
-    all_dialogues = extractor.process_all_transcripts()
-    
-    # Replace placeholder with actual dialogue data
-    html_content = html_content.replace(
-        'DIALOGUE_PLACEHOLDER',
-        json.dumps(all_dialogues, indent=2)
-    )
-    
     # Save HTML file
     html_path = Path(output_dir) / "timing_corrector.html"
     with open(html_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
     
-    print(f"Timing correction tool created at: {html_path}")
+    print(f"\n✨ Timing correction tool created at: {html_path}")
+    print("\n📝 Instructions:")
+    print("1. Open the HTML file in your browser")
+    print("2. Watch each episode and enter timestamps for BMO's lines")
+    print("3. Use 'MM:SS.ms' format (e.g., 05:23.5)")
+    print("4. Click 'Save All Timings' to save to browser")
+    print("5. Export as JSON when done")
+    
     return html_path
 
 # Main execution script
 if __name__ == "__main__":
     # Configuration - UPDATE THESE PATHS
-    TRANSCRIPTS_DIR = "adventure_time_transcripts"  # Your transcripts folder
-    VIDEOS_DIR = "/path/to/your/adventure/time/episodes"  # Your video files
-    OUTPUT_DIR = "bmo_audio_clips"  # Where to save BMO clips
+    TRANSCRIPTS_DIR = "/home/ogbobby/Documents/git/AdventureTimeTranscriptScrape/adventure_time_transcripts_advanced/Season_1_2010[]"  # Your transcripts folder
+    VIDEOS_DIR = "/home/ogbobby/Documents/AdventureTime/Season_1"  # Your video files
+    OUTPUT_DIR = "/home/ogbobby/Documents/BMO"  # Where to save BMO clips
+    
+    # Convert to Path objects
+    transcripts_path = Path(TRANSCRIPTS_DIR)
+    videos_path = Path(VIDEOS_DIR)
+    output_path = Path(OUTPUT_DIR)
     
     print("🎮 BMO Dialogue Extractor")
+    print("="*50)
+    print(f"Transcripts directory: {transcripts_path}")
+    print(f"Videos directory: {videos_path}")
+    print(f"Output directory: {output_path}")
     print("="*50)
     print("1. Extract BMO dialogues only (metadata)")
     print("2. Extract BMO dialogues and attempt audio extraction")
     print("3. Create timing correction tool")
     print("4. Full pipeline with manual timing")
+    print("5. Test with single episode")
     
-    choice = input("\nSelect option (1-4): ").strip()
+    choice = input("\nSelect option (1-5): ").strip()
     
     if choice == "1":
-        extractor = BMOTranscriptExtractor(TRANSCRIPTS_DIR, VIDEOS_DIR, OUTPUT_DIR)
+        extractor = BMOTranscriptExtractor(transcripts_path, videos_path, output_path)
         extractor.process_all_transcripts()
         
     elif choice == "2":
-        extractor = BMOAudioExtractor(TRANSCRIPTS_DIR, VIDEOS_DIR, OUTPUT_DIR)
-        extractor.extract_all_audio()
+        # Check if manual timings file exists
+        manual_file = output_path / "bmo_timings.json"
+        if manual_file.exists():
+            print(f"Found manual timings: {manual_file}")
+            use_manual = input("Use manual timings? (y/n): ").strip().lower()
+            if use_manual == 'y':
+                extractor = BMOAudioExtractor(transcripts_path, videos_path, output_path)
+                extractor.extract_all_audio(manual_file)
+            else:
+                extractor = BMOAudioExtractor(transcripts_path, videos_path, output_path)
+                extractor.extract_all_audio()
+        else:
+            print("No manual timings file found. Using estimated timestamps.")
+            extractor = BMOAudioExtractor(transcripts_path, videos_path, output_path)
+            extractor.extract_all_audio()
         
     elif choice == "3":
-        create_timing_correction_tool(TRANSCRIPTS_DIR, OUTPUT_DIR)
+        create_timing_correction_tool(transcripts_path, output_path)
         
     elif choice == "4":
-        print("\nStep 1: Extract BMO dialogues")
-        extractor = BMOTranscriptExtractor(TRANSCRIPTS_DIR, VIDEOS_DIR, OUTPUT_DIR)
+        print("\n📋 Full Pipeline")
+        print("Step 1: Extract BMO dialogues")
+        extractor = BMOTranscriptExtractor(transcripts_path, videos_path, output_path)
         extractor.process_all_transcripts()
         
         print("\nStep 2: Create timing correction tool")
-        create_timing_correction_tool(TRANSCRIPTS_DIR, OUTPUT_DIR)
+        html_path = create_timing_correction_tool(transcripts_path, output_path)
         
-        print("\n📝 Next steps:")
-        print("1. Open the timing_corrector.html file in your browser")
+        print(f"\n📝 Next steps:")
+        print("1. Open this file in your browser:")
+        print(f"   {html_path}")
         print("2. Watch each episode and enter the timestamps for BMO's lines")
-        print("3. Export the timings as JSON")
-        print("4. Run option 2 with the exported JSON file")
+        print("3. Export the timings as 'bmo_timings.json'")
+        print("4. Run option 2 again with the exported JSON file")
+        
+    elif choice == "5":
+        # Test with a single episode
+        episode = input("Enter episode name (without .txt): ").strip()
+        extractor = BMOAudioExtractor(transcripts_path, videos_path, output_path)
+        
+        # Find the transcript file
+        transcript_files = list(transcripts_path.rglob(f"*{episode}*.txt"))
+        if transcript_files:
+            print(f"Testing with: {transcript_files[0].name}")
+            # Process just this episode
+            dialogues = extractor.extract_bmo_dialogues_from_transcript(transcript_files[0])
+            print(f"Found {len(dialogues)} BMO lines")
+            
+            video = extractor.find_matching_video(transcript_files[0].stem)
+            if video:
+                print(f"Found video: {video.name}")
+                
+                # Create test output directory
+                test_output = output_path / "test"
+                test_output.mkdir(parents=True, exist_ok=True)
+                
+                for i, dialogue in enumerate(dialogues[:3]):  # Test first 3 lines
+                    print(f"\nTesting line {i+1}: {dialogue['dialogue'][:50]}...")
+                    with open(transcript_files[0], 'r', encoding='utf-8') as f:
+                        full = f.read()
+                    timestamp = extractor.estimate_timestamp(dialogue['dialogue'], full)
+                    
+                    output_file = test_output / f"test_{i+1}_{episode}.mp3"
+                    success = extractor.extract_audio_clip(video, timestamp, 3.0, output_file)
+                    if success:
+                        print(f"  ✓ Test successful: {output_file}")
+                    else:
+                        print(f"  ✗ Test failed")
+            else:
+                print("No matching video found")
+        else:
+            print(f"No transcript found for episode: {episode}")
