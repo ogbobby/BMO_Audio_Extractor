@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 from datetime import timedelta
+import sys
 
 class BMOTranscriptExtractor:
     def __init__(self, transcripts_dir, videos_dir, output_dir):
@@ -23,8 +24,6 @@ class BMOTranscriptExtractor:
     def extract_bmo_dialogues_from_transcript(self, transcript_file):
         """
         Extract all BMO dialogues from a single transcript file
-        Handles the format where character name is on its own line
-        followed by dialogue on the next line(s)
         """
         with open(transcript_file, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -35,128 +34,32 @@ class BMOTranscriptExtractor:
         while i < len(lines):
             current_line = lines[i].strip()
             
-            # Check if this line is a character name (all caps or capitalized, no colon)
-            # BMO might appear as "BMO" or "BMO:" in some formats
-            if current_line in ['BMO', 'BMO:'] or current_line.startswith('BMO '):
-                # Found BMO speaking
-                dialogue_lines = []
-                i += 1  # Move to next line for dialogue
-                
-                # Collect all dialogue lines until we hit another character name or empty line
-                while i < len(lines):
-                    next_line = lines[i].strip()
+            # Look for "BMO" on its own line
+            if current_line == "BMO":
+                # Next line should be the colon with dialogue
+                if i + 1 < len(lines):
+                    dialogue_line = lines[i + 1].strip()
                     
-                    # Stop if we hit another character name (all caps word)
-                    if next_line and next_line.isupper() and len(next_line) < 30:
-                        break
-                    # Also stop if we hit a line with a colon (alternative format)
-                    if ':' in next_line and next_line.split(':')[0].strip().isupper():
-                        break
-                    # Stop if we hit an empty line after collecting dialogue
-                    if not next_line and dialogue_lines:
-                        break
-                    
-                    if next_line:  # Only add non-empty lines
-                        dialogue_lines.append(next_line)
-                    i += 1
-                
-                # Join all dialogue lines
-                if dialogue_lines:
-                    full_dialogue = ' '.join(dialogue_lines)
-                    bmo_dialogues.append({
-                        'dialogue': full_dialogue,
-                        'line_number': i - len(dialogue_lines),
-                        'speaker': 'BMO'
-                    })
+                    # Check if it starts with ":" and has dialogue
+                    if dialogue_line.startswith(':'):
+                        # Extract everything after the colon and space
+                        dialogue = dialogue_line[1:].strip()
+                        if dialogue:
+                            bmo_dialogues.append({
+                                'dialogue': dialogue,
+                                'line_number': i + 1,
+                                'speaker': 'BMO',
+                                'transcript_file': str(transcript_file)
+                            })
+                i += 2
             else:
                 i += 1
         
         return bmo_dialogues
     
-    def extract_all_dialogues_by_character(self, transcript_file, character):
-        """
-        Extract all dialogues for a specific character
-        Useful for verification or other characters
-        """
-        with open(transcript_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        dialogues = []
-        i = 0
-        
-        while i < len(lines):
-            current_line = lines[i].strip()
-            
-            # Check if this line is the target character
-            if current_line in [character, f'{character}:'] or current_line.startswith(f'{character} '):
-                dialogue_lines = []
-                i += 1
-                
-                while i < len(lines):
-                    next_line = lines[i].strip()
-                    
-                    # Stop if we hit another character name
-                    if next_line and next_line.isupper() and len(next_line) < 30:
-                        break
-                    if ':' in next_line and next_line.split(':')[0].strip().isupper():
-                        break
-                    if not next_line and dialogue_lines:
-                        break
-                    
-                    if next_line:
-                        dialogue_lines.append(next_line)
-                    i += 1
-                
-                if dialogue_lines:
-                    full_dialogue = ' '.join(dialogue_lines)
-                    dialogues.append({
-                        'dialogue': full_dialogue,
-                        'line_number': i - len(dialogue_lines),
-                        'speaker': character
-                    })
-            else:
-                i += 1
-        
-        return dialogues
-    
-    def verify_bmo_dialogues(self, transcript_file):
-        """
-        Verify that we're correctly identifying BMO dialogues
-        by showing context around each found dialogue
-        """
-        with open(transcript_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        print(f"\nVerifying BMO dialogues in: {transcript_file.name}")
-        print("="*60)
-        
-        bmo_lines = self.extract_bmo_dialogues_from_transcript(transcript_file)
-        
-        for i, dialogue in enumerate(bmo_lines):
-            print(f"\nBMO Line {i+1}:")
-            print(f"Dialogue: {dialogue['dialogue']}")
-            
-            # Show context (2 lines before and after)
-            start = max(0, dialogue['line_number'] - 4)
-            end = min(len(lines), dialogue['line_number'] + 4)
-            
-            print("Context:")
-            for j in range(start, end):
-                prefix = "→ " if j >= dialogue['line_number'] - 2 else "  "
-                print(f"{prefix}{j+1}: {lines[j].strip()}")
-            print("-"*40)
-        
-        return bmo_lines
-    
     def find_matching_video(self, episode_name):
         """
         Find the video file that matches an episode name
-        
-        Args:
-            episode_name: Name of the episode (from transcript filename)
-        
-        Returns:
-            Path to video file or None
         """
         # Clean up episode name for matching
         search_name = re.sub(r'[_\s]+', ' ', episode_name).strip()
@@ -179,28 +82,14 @@ class BMOTranscriptExtractor:
         
         return None
     
-    def estimate_timestamp(self, dialogue_index, total_dialogues):
+    def extract_audio_clip(self, video_path, start_time, end_time, output_path):
         """
-        Estimate timestamp based on dialogue position in episode
-        This is a rough estimate - manual timing is recommended
-        """
-        # Assume 22-minute episode (1320 seconds)
-        # Distribute dialogues evenly
-        if total_dialogues > 0:
-            return (dialogue_index / total_dialogues) * 1320
-        return 0.0
-    
-    def extract_audio_clip(self, video_path, start_time, duration, output_path):
-        """
-        Extract audio clip using ffmpeg
-        
-        Args:
-            video_path: Path to video file
-            start_time: When to start extraction (seconds as float)
-            duration: How long to extract (seconds)
-            output_path: Where to save the audio clip
+        Extract audio clip using ffmpeg with precise start and end times
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Calculate duration
+        duration = end_time - start_time
         
         cmd = [
             'ffmpeg',
@@ -225,175 +114,289 @@ class BMOTranscriptExtractor:
             print("  Error: ffmpeg not found. Please install ffmpeg and ensure it's in your PATH")
             return False
     
-    def process_all_transcripts(self):
+    def get_video_duration(self, video_path):
         """
-        Main method to process all transcripts and extract BMO dialogues
+        Get the duration of a video file using ffprobe
+        """
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(video_path)
+        ]
+        
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return float(result.stdout.strip())
+        except:
+            return None
+    
+    def create_timing_template(self, output_file=None):
+        """
+        Create a JSON template for manual timing entry
         """
         all_bmo_lines = []
-        
         transcript_files = list(self.transcripts_dir.rglob("*.txt"))
-        print(f"Found {len(transcript_files)} transcript files")
         
         for transcript_file in sorted(transcript_files):
             episode_name = transcript_file.stem
-            print(f"\nProcessing: {episode_name}")
-            
-            # Extract BMO dialogues
             dialogues = self.extract_bmo_dialogues_from_transcript(transcript_file)
             
-            if dialogues:
-                print(f"  Found {len(dialogues)} BMO lines")
-                
-                # Find matching video
-                video_path = self.find_matching_video(episode_name)
-                
-                if video_path:
-                    print(f"  Found video: {video_path.name}")
-                    
-                    # Process each dialogue
-                    for i, dialogue_data in enumerate(dialogues):
-                        dialogue = dialogue_data['dialogue']
-                        
-                        # Create safe filename
-                        safe_dialogue = re.sub(r'[^\w\s-]', '', dialogue)[:50]
-                        safe_dialogue = re.sub(r'\s+', '_', safe_dialogue.strip())
-                        output_filename = f"{episode_name}_BMO_{i+1:03d}_{safe_dialogue}.mp3"
-                        output_path = self.output_dir / episode_name / output_filename
-                        
-                        # Estimate timing (rough)
-                        estimated_time = self.estimate_timestamp(i, len(dialogues))
-                        
-                        dialogue_entry = {
-                            'episode': episode_name,
-                            'dialogue': dialogue,
-                            'estimated_time': estimated_time,
-                            'dialogue_index': i,
-                            'total_dialogues': len(dialogues),
-                            'video_file': str(video_path),
-                            'output_file': str(output_path)
-                        }
-                        all_bmo_lines.append(dialogue_entry)
-                        
-                        print(f"    Line {i+1}: {dialogue[:50]}...")
-                else:
-                    print(f"  Warning: No video found for {episode_name}")
-            else:
-                print(f"  No BMO lines found")
+            # Find matching video
+            video_path = self.find_matching_video(episode_name)
+            video_duration = self.get_video_duration(video_path) if video_path else None
+            
+            for i, dialogue in enumerate(dialogues):
+                all_bmo_lines.append({
+                    'id': f"{episode_name}_{i+1:03d}",
+                    'episode': episode_name,
+                    'dialogue': dialogue['dialogue'],
+                    'video_file': str(video_path) if video_path else "MISSING",
+                    'video_duration': video_duration,
+                    'timestamp': '',  # To be filled by user
+                    'duration': '',   # To be filled by user
+                    'notes': ''
+                })
         
-        # Save metadata
-        metadata_file = self.output_dir / "bmo_dialogues_metadata.json"
-        with open(metadata_file, 'w', encoding='utf-8') as f:
+        if output_file is None:
+            output_file = self.output_dir / "bmo_timing_template.json"
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(all_bmo_lines, f, indent=2, ensure_ascii=False)
         
-        print(f"\n✅ Found {len(all_bmo_lines)} total BMO lines across all episodes")
-        print(f"Metadata saved to: {metadata_file}")
+        print(f"✅ Created timing template with {len(all_bmo_lines)} BMO lines")
+        print(f"📄 Template saved to: {output_file}")
+        print("\n📝 Instructions:")
+        print("1. Open this JSON file in a text editor or spreadsheet")
+        print("2. For each line, watch the episode and note the timestamp (in seconds)")
+        print("3. Format: timestamp = seconds when BMO starts speaking")
+        print("4. Optional: duration = length of the dialogue in seconds")
+        print("5. Save the file and run the extraction with it")
         
-        return all_bmo_lines
-
-class BMOAudioExtractor(BMOTranscriptExtractor):
-    """
-    Extended class that actually extracts the audio clips
-    """
+        return output_file
     
-    def parse_timestamp(self, time_str):
+    def extract_with_timing_file(self, timing_file):
         """
-        Parse various timestamp formats to seconds as float
+        Extract audio using a manually created timing file
         """
-        if isinstance(time_str, (int, float)):
-            return float(time_str)
+        with open(timing_file, 'r', encoding='utf-8') as f:
+            timing_data = json.load(f)
         
-        time_str = str(time_str).strip()
-        
-        try:
-            return float(time_str)
-        except ValueError:
-            pass
-        
-        try:
-            parts = time_str.split(':')
-            if len(parts) == 3:
-                h, m, s = parts
-                return int(h) * 3600 + int(m) * 60 + float(s)
-            elif len(parts) == 2:
-                m, s = parts
-                return int(m) * 60 + float(s)
-            else:
-                return 0.0
-        except (ValueError, IndexError):
-            print(f"  Warning: Could not parse timestamp '{time_str}'")
-            return 0.0
-    
-    def extract_all_audio(self, manual_timing_file=None):
-        """
-        Extract audio for all BMO dialogues
-        """
-        all_dialogues = self.process_all_transcripts()
-        
-        # Load manual timings if provided
-        manual_timings = {}
-        if manual_timing_file and Path(manual_timing_file).exists():
-            with open(manual_timing_file, 'r', encoding='utf-8') as f:
-                for item in json.load(f):
-                    key = f"{item['episode']}_{item['dialogue_index']}"
-                    manual_timings[key] = item['timestamp']
-        
-        print(f"\n🎬 Extracting audio clips for {len(all_dialogues)} BMO lines...")
+        print(f"\n🎬 Extracting {len(timing_data)} BMO audio clips with manual timings...")
         
         successful = 0
         failed = 0
+        missing_video = 0
+        missing_timestamp = 0
         
-        for i, dialogue_data in enumerate(all_dialogues):
-            episode = dialogue_data['episode']
-            video_path = Path(dialogue_data['video_file'])
-            dialogue = dialogue_data['dialogue']
-            output_path = Path(dialogue_data['output_file'])
-            dialogue_index = dialogue_data['dialogue_index']
+        for item in timing_data:
+            episode = item['episode']
+            dialogue = item['dialogue']
+            timestamp = item.get('timestamp', '')
+            duration = item.get('duration', '')
             
-            # Create key for manual timing lookup
-            key = f"{episode}_{dialogue_index}"
+            # Skip if no timestamp
+            if not timestamp:
+                print(f"\n⏭️  Skipping {item['id']}: No timestamp provided")
+                missing_timestamp += 1
+                continue
             
-            if key in manual_timings:
-                start_time = self.parse_timestamp(manual_timings[key])
-                print(f"\n[{i+1}/{len(all_dialogues)}] Using manual timing ({start_time:.2f}s) for line {dialogue_index+1}")
-            else:
-                start_time = float(dialogue_data['estimated_time'])
-                print(f"\n[{i+1}/{len(all_dialogues)}] Using estimated timing ({start_time:.2f}s) for line {dialogue_index+1}")
-            
-            # Estimate duration based on dialogue length
-            word_count = len(dialogue.split())
-            duration = max(1.5, (word_count / 2.5) + 1.0)
-            
-            if not video_path.exists():
-                print(f"  ✗ Video file not found: {video_path}")
+            # Convert timestamp to float
+            try:
+                start_time = float(timestamp)
+            except ValueError:
+                print(f"\n❌ Invalid timestamp for {item['id']}: {timestamp}")
                 failed += 1
                 continue
             
-            print(f"  Dialogue: {dialogue[:100]}...")
-            print(f"  Extracting {duration:.1f}s clip...")
+            # Use provided duration or estimate
+            if duration:
+                try:
+                    clip_duration = float(duration)
+                except ValueError:
+                    word_count = len(dialogue.split())
+                    clip_duration = max(1.5, (word_count / 2.5) + 1.0)
+            else:
+                word_count = len(dialogue.split())
+                clip_duration = max(1.5, (word_count / 2.5) + 1.0)
             
-            success = self.extract_audio_clip(video_path, start_time, duration, output_path)
+            # Check if video exists
+            video_path = Path(item['video_file'])
+            if not video_path.exists():
+                print(f"\n❌ Video not found for {episode}: {video_path}")
+                missing_video += 1
+                continue
+            
+            # Create output path
+            safe_dialogue = re.sub(r'[^\w\s-]', '', dialogue)[:50]
+            safe_dialogue = re.sub(r'\s+', '_', safe_dialogue.strip())
+            output_filename = f"{item['id']}_{safe_dialogue}.mp3"
+            output_path = self.output_dir / episode / output_filename
+            
+            print(f"\n📢 {item['id']}:")
+            print(f"   Dialogue: {dialogue[:75]}...")
+            print(f"   Time: {start_time:.2f}s - {start_time + clip_duration:.2f}s ({clip_duration:.1f}s)")
+            
+            # Extract audio
+            end_time = start_time + clip_duration
+            success = self.extract_audio_clip(video_path, start_time, end_time, output_path)
             
             if success:
-                print(f"  ✓ Saved to: {output_path.name}")
+                print(f"   ✓ Saved to: {output_path}")
                 successful += 1
             else:
-                print(f"  ✗ Failed to extract audio")
+                print(f"   ✗ Failed to extract")
                 failed += 1
         
         print(f"\n{'='*50}")
-        print(f"✅ AUDIO EXTRACTION COMPLETE")
+        print(f"✅ EXTRACTION COMPLETE")
         print(f"{'='*50}")
         print(f"Successful: {successful}")
         print(f"Failed: {failed}")
-        print(f"Total: {successful + failed}")
+        print(f"Missing video: {missing_video}")
+        print(f"Missing timestamp: {missing_timestamp}")
+        print(f"Total processed: {len(timing_data)}")
         print(f"\nFiles saved in: {self.output_dir}")
+
+class BMOInteractiveExtractor(BMOTranscriptExtractor):
+    """
+    Interactive version that asks for timestamps while playing videos
+    """
+    
+    def interactive_extract(self):
+        """
+        Interactive mode: for each BMO line, play the video and ask for timestamp
+        """
+        all_bmo_lines = []
+        transcript_files = list(self.transcripts_dir.rglob("*.txt"))
+        
+        # First, collect all BMO lines
+        for transcript_file in sorted(transcript_files):
+            episode_name = transcript_file.stem
+            dialogues = self.extract_bmo_dialogues_from_transcript(transcript_file)
+            
+            video_path = self.find_matching_video(episode_name)
+            if not video_path:
+                print(f"⚠️  Warning: No video found for {episode_name}")
+                continue
+            
+            for i, dialogue in enumerate(dialogues):
+                all_bmo_lines.append({
+                    'id': f"{episode_name}_{i+1:03d}",
+                    'episode': episode_name,
+                    'dialogue': dialogue['dialogue'],
+                    'video_file': str(video_path),
+                    'timestamp': None
+                })
+        
+        print(f"\n🎮 Interactive BMO Audio Extractor")
+        print(f"Found {len(all_bmo_lines)} BMO lines across all episodes")
+        print("="*60)
+        
+        successful = 0
+        skipped = 0
+        
+        for idx, item in enumerate(all_bmo_lines):
+            print(f"\n[{idx+1}/{len(all_bmo_lines)}] {item['id']}")
+            print(f"📝 Dialogue: {item['dialogue']}")
+            print(f"🎬 Video: {Path(item['video_file']).name}")
+            
+            # Ask for timestamp
+            print("\nOptions:")
+            print("  [timestamp] - Enter timestamp in seconds (e.g., 125.5)")
+            print("  [MM:SS] - Enter timestamp in minutes:seconds (e.g., 2:05)")
+            print("  s - Skip this line")
+            print("  q - Quit and save progress")
+            
+            response = input("⏱️  When does BMO start speaking? ").strip().lower()
+            
+            if response == 'q':
+                break
+            elif response == 's':
+                skipped += 1
+                continue
+            
+            # Parse timestamp
+            timestamp = self.parse_timestamp_input(response)
+            if timestamp is None:
+                print("❌ Invalid timestamp format. Skipping...")
+                skipped += 1
+                continue
+            
+            # Calculate duration based on dialogue length
+            word_count = len(item['dialogue'].split())
+            duration = max(1.5, (word_count / 2.5) + 1.0)
+            
+            # Create output path
+            safe_dialogue = re.sub(r'[^\w\s-]', '', item['dialogue'])[:50]
+            safe_dialogue = re.sub(r'\s+', '_', safe_dialogue.strip())
+            output_filename = f"{item['id']}_{safe_dialogue}.mp3"
+            output_path = self.output_dir / item['episode'] / output_filename
+            
+            # Extract audio
+            print(f"   Extracting {duration:.1f}s clip...")
+            success = self.extract_audio_clip(
+                Path(item['video_file']),
+                timestamp,
+                timestamp + duration,
+                output_path
+            )
+            
+            if success:
+                print(f"   ✓ Saved to: {output_path}")
+                successful += 1
+                item['timestamp'] = timestamp
+                item['duration'] = duration
+            else:
+                print(f"   ✗ Failed to extract")
+        
+        # Save progress
+        progress_file = self.output_dir / "interactive_progress.json"
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            json.dump(all_bmo_lines, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n{'='*50}")
+        print(f"✅ INTERACTIVE SESSION COMPLETE")
+        print(f"{'='*50}")
+        print(f"Successful: {successful}")
+        print(f"Skipped: {skipped}")
+        print(f"Progress saved to: {progress_file}")
+    
+    def parse_timestamp_input(self, input_str):
+        """
+        Parse various timestamp formats:
+        - Seconds as number: 125.5
+        - MM:SS: 2:05 -> 125 seconds
+        - MM:SS.ms: 2:05.5 -> 125.5 seconds
+        """
+        input_str = input_str.strip()
+        
+        # Try as simple float first
+        try:
+            return float(input_str)
+        except ValueError:
+            pass
+        
+        # Try MM:SS format
+        try:
+            if ':' in input_str:
+                parts = input_str.split(':')
+                if len(parts) == 2:
+                    minutes = int(parts[0])
+                    seconds = float(parts[1])
+                    return minutes * 60 + seconds
+        except (ValueError, IndexError):
+            pass
+        
+        return None
 
 # Main execution script
 if __name__ == "__main__":
     # Configuration - UPDATE THESE PATHS
-    TRANSCRIPTS_DIR = "/home/ogbobby/Documents/git/AdventureTimeTranscriptScrape/adventure_time_transcripts_advanced/Season_1_2010[]"  # Your transcripts folder
-    VIDEOS_DIR = "/home/ogbobby/Documents/AdventureTime/Season_1"  # Your video files
-    OUTPUT_DIR = "/home/ogbobby/Documents/BMO"  # Where to save BMO clips
+    TRANSCRIPTS_DIR = "adventure_time_transcripts"  # Your transcripts folder
+    VIDEOS_DIR = "/path/to/your/adventure/time/episodes"  # Your video files
+    OUTPUT_DIR = "bmo_audio_clips"  # Where to save BMO clips
     
     # Convert to Path objects
     transcripts_path = Path(TRANSCRIPTS_DIR)
@@ -401,17 +404,17 @@ if __name__ == "__main__":
     output_path = Path(OUTPUT_DIR)
     
     print("🎮 BMO Dialogue Extractor")
-    print("="*50)
+    print("="*60)
     print(f"Transcripts directory: {transcripts_path}")
     print(f"Videos directory: {videos_path}")
     print(f"Output directory: {output_path}")
-    print("="*50)
+    print("="*60)
     print("1. Extract BMO dialogues only (metadata)")
-    print("2. Extract BMO dialogues and attempt audio extraction")
-    print("3. Verify BMO extraction on a single episode")
-    print("4. Create timing correction tool")
-    print("5. Full pipeline with manual timing")
-    print("6. Test with single episode")
+    print("2. Create timing template (JSON for manual entry)")
+    print("3. Extract with timing file (use your JSON)")
+    print("4. Interactive mode (enter timestamps while watching)")
+    print("5. Verify BMO extraction on a single episode")
+    print("6. Test with single episode (extract audio)")
     
     choice = input("\nSelect option (1-6): ").strip()
     
@@ -420,77 +423,87 @@ if __name__ == "__main__":
         extractor.process_all_transcripts()
         
     elif choice == "2":
-        manual_file = output_path / "bmo_timings.json"
-        if manual_file.exists():
-            print(f"Found manual timings: {manual_file}")
-            use_manual = input("Use manual timings? (y/n): ").strip().lower()
-            if use_manual == 'y':
-                extractor = BMOAudioExtractor(transcripts_path, videos_path, output_path)
-                extractor.extract_all_audio(manual_file)
-            else:
-                extractor = BMOAudioExtractor(transcripts_path, videos_path, output_path)
-                extractor.extract_all_audio()
-        else:
-            print("No manual timings file found. Using estimated timestamps.")
-            extractor = BMOAudioExtractor(transcripts_path, videos_path, output_path)
-            extractor.extract_all_audio()
-    
+        extractor = BMOTranscriptExtractor(transcripts_path, videos_path, output_path)
+        template_file = extractor.create_timing_template()
+        print(f"\n📝 Next steps:")
+        print(f"1. Open {template_file} in a spreadsheet or text editor")
+        print("2. For each line, watch the episode and fill in the 'timestamp' field")
+        print("3. Save the file and run option 3 with it")
+        
     elif choice == "3":
-        # Verify extraction on a single episode
+        timing_file = input("Enter path to timing JSON file: ").strip()
+        timing_path = Path(timing_file)
+        if not timing_path.exists():
+            timing_path = output_path / "bmo_timing_template.json"
+        
+        if timing_path.exists():
+            extractor = BMOTranscriptExtractor(transcripts_path, videos_path, output_path)
+            extractor.extract_with_timing_file(timing_path)
+        else:
+            print(f"❌ Timing file not found: {timing_path}")
+            print("Create one first with option 2")
+    
+    elif choice == "4":
+        extractor = BMOInteractiveExtractor(transcripts_path, videos_path, output_path)
+        extractor.interactive_extract()
+    
+    elif choice == "5":
         episode = input("Enter episode name to verify (without .txt): ").strip()
         extractor = BMOTranscriptExtractor(transcripts_path, videos_path, output_path)
         
         transcript_files = list(transcripts_path.rglob(f"*{episode}*.txt"))
         if transcript_files:
-            extractor.verify_bmo_dialogues(transcript_files[0])
+            dialogues = extractor.extract_bmo_dialogues_from_transcript(transcript_files[0])
+            print(f"\nFound {len(dialogues)} BMO lines in {episode}:")
+            for i, d in enumerate(dialogues):
+                print(f"\n{i+1}. \"{d['dialogue']}\"")
         else:
             print(f"No transcript found for episode: {episode}")
     
-    elif choice == "4":
-        # Create timing correction tool (simplified version)
-        print("Timing correction tool creation - coming soon!")
-        
-    elif choice == "5":
-        print("\n📋 Full Pipeline")
-        print("Step 1: Extract BMO dialogues")
-        extractor = BMOTranscriptExtractor(transcripts_path, videos_path, output_path)
-        extractor.process_all_transcripts()
-        
-        print("\n⚠️  Manual timing required for accurate extraction")
-        print("For now, use option 3 to verify extraction, then option 2 for audio")
-        
     elif choice == "6":
         episode = input("Enter episode name (without .txt): ").strip()
-        extractor = BMOAudioExtractor(transcripts_path, videos_path, output_path)
+        extractor = BMOInteractiveExtractor(transcripts_path, videos_path, output_path)
         
         transcript_files = list(transcripts_path.rglob(f"*{episode}*.txt"))
         if transcript_files:
-            print(f"Testing with: {transcript_files[0].name}")
             dialogues = extractor.extract_bmo_dialogues_from_transcript(transcript_files[0])
-            print(f"Found {len(dialogues)} BMO lines")
+            print(f"\nFound {len(dialogues)} BMO lines in {episode}")
             
-            # Print first few dialogues to verify
-            for i, dialogue in enumerate(dialogues[:5]):
-                print(f"\nBMO Line {i+1}: {dialogue['dialogue']}")
+            for i, dialogue in enumerate(dialogues):
+                print(f"\n{i+1}. \"{dialogue['dialogue']}\"")
             
-            video = extractor.find_matching_video(transcript_files[0].stem)
-            if video:
-                print(f"\nFound video: {video.name}")
-                
-                test_output = output_path / "test"
-                test_output.mkdir(parents=True, exist_ok=True)
-                
-                # Test first 2 lines
-                for i, dialogue in enumerate(dialogues[:2]):
-                    print(f"\nExtracting line {i+1}...")
-                    timestamp = extractor.estimate_timestamp(i, len(dialogues))
-                    output_file = test_output / f"test_{i+1}_{episode}.mp3"
-                    success = extractor.extract_audio_clip(video, timestamp, 3.0, output_file)
-                    if success:
-                        print(f"  ✓ Saved to: {output_file}")
-                    else:
-                        print(f"  ✗ Failed")
-            else:
+            # Ask for timestamp
+            print("\nEnter timestamp for each line (or 's' to skip, 'q' to quit)")
+            
+            video = extractor.find_matching_video(episode)
+            if not video:
                 print("No matching video found")
-        else:
-            print(f"No transcript found for episode: {episode}")
+                sys.exit(1)
+            
+            test_output = output_path / "test"
+            test_output.mkdir(parents=True, exist_ok=True)
+            
+            for i, dialogue in enumerate(dialogues[:3]):  # Test first 3
+                print(f"\nLine {i+1}: \"{dialogue['dialogue']}\"")
+                ts_input = input("Timestamp (seconds or MM:SS): ").strip()
+                
+                if ts_input.lower() == 'q':
+                    break
+                if ts_input.lower() == 's':
+                    continue
+                
+                timestamp = extractor.parse_timestamp_input(ts_input)
+                if timestamp is None:
+                    print("Invalid timestamp, skipping")
+                    continue
+                
+                word_count = len(dialogue['dialogue'].split())
+                duration = max(2.0, (word_count / 2.5) + 1.0)
+                
+                output_file = test_output / f"test_{i+1}_{episode}.mp3"
+                success = extractor.extract_audio_clip(video, timestamp, timestamp + duration, output_file)
+                
+                if success:
+                    print(f"  ✓ Saved to: {output_file}")
+                else:
+                    print(f"  ✗ Failed")
