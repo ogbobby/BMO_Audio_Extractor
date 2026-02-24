@@ -8,7 +8,6 @@ from pathlib import Path
 from datetime import timedelta
 import torch
 from difflib import SequenceMatcher
-#import Levenshtein
 
 class BMOAutoExtractor:
     def __init__(self, transcripts_dir, videos_dir, output_dir):
@@ -25,14 +24,18 @@ class BMOAutoExtractor:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Load Whisper model (choose size based on your GPU/CPU)
+        # Buffer settings - ADJUST THESE IF NEEDED
+        self.before_buffer = 0.0  # seconds to include before speech starts
+        self.after_buffer = 3.0   # seconds to include after speech ends
+        
+        # Load Whisper model
         print("Loading Whisper model...")
         self.model = whisper.load_model("base")
         print("Model loaded!")
         
     def extract_bmo_dialogues_from_transcript(self, transcript_file):
         """
-        Extract all BMO dialogues from a transcript file with better pattern matching
+        Extract all BMO dialogues from a transcript file
         """
         with open(transcript_file, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -46,7 +49,6 @@ class BMOAutoExtractor:
         while i < len(lines):
             current_line = lines[i].strip()
             
-            # Pattern 1: "BMO" on its own line followed by colon line
             if current_line == "BMO" and i + 1 < len(lines):
                 next_line = lines[i + 1].strip()
                 if next_line.startswith(':'):
@@ -69,11 +71,7 @@ class BMOAutoExtractor:
     
     def clean_dialogue_for_matching(self, text):
         """
-        Clean dialogue text for better matching by pip install python-levenshteinremoving:
-        - Stage directions in brackets
-        - Extra punctuation
-        - Repeated characters (like multiple dots)
-        - Convert to lowercase
+        Clean dialogue text for better matching
         """
         # Remove stage directions in brackets
         text = re.sub(r'\[.*?\]', '', text)
@@ -126,22 +124,20 @@ class BMOAutoExtractor:
         """
         print(f"  Transcribing {video_path.name}...")
         
-        # Transcribe with word-level timestamps
         result = self.model.transcribe(
             str(video_path),
             word_timestamps=True,
             language='en',
             verbose=False,
-            fp16=False  # Disable FP16 for CPU
+            fp16=False
         )
         
         return result
     
-    def find_dialogue_advanced(self, target_dialogue, transcription_segments):
+    def find_dialogue_in_transcription(self, target_dialogue, transcription_segments):
         """
-        Advanced dialogue finding using multiple matching strategies
+        Find a specific dialogue in the transcription results
         """
-        # Clean the target dialogue
         target_clean = self.clean_dialogue_for_matching(target_dialogue)
         target_words = target_clean.split()
         
@@ -151,87 +147,66 @@ class BMOAutoExtractor:
         best_match = None
         best_score = 0
         
-        for segment_idx, segment in enumerate(transcription_segments):
+        for segment in transcription_segments:
             segment_clean = self.clean_dialogue_for_matching(segment['text'])
             
-            # Strategy 1: Full segment similarity
-            full_similarity = SequenceMatcher(None, target_clean, segment_clean).ratio()
+            # Check full segment similarity
+            similarity = SequenceMatcher(None, target_clean, segment_clean).ratio()
             
-            if full_similarity > best_score and full_similarity > 0.5:
-                best_score = full_similarity
+            if similarity > best_score and similarity > 0.4:
+                best_score = similarity
                 best_match = {
                     'text': segment['text'],
                     'start': segment['start'],
                     'end': segment['end'],
-                    'similarity': full_similarity,
+                    'similarity': similarity,
                     'method': 'full_segment'
                 }
             
-            # Strategy 2: Look for key phrases
-            # Split target into key phrases (by punctuation or length)
-            key_phrases = re.split(r'[.!?]', target_clean)
-            key_phrases = [p.strip() for p in key_phrases if len(p.split()) > 2]
-            
-            for phrase in key_phrases:
-                if phrase in segment_clean:
-                    score = len(phrase) / len(segment_clean)
-                    if score > best_score:
-                        best_score = score
-                        best_match = {
-                            'text': segment['text'],
-                            'start': segment['start'],
-                            'end': segment['end'],
-                            'similarity': score,
-                            'method': 'key_phrase'
-                        }
-            
-            # Strategy 3: Word-by-word matching with context
+            # Check word windows
             segment_words = segment_clean.split()
             for i in range(len(segment_words) - len(target_words) + 1):
                 window = ' '.join(segment_words[i:i+len(target_words)])
-                similarity = SequenceMatcher(None, target_clean, window).ratio()
+                window_similarity = SequenceMatcher(None, target_clean, window).ratio()
                 
-                if similarity > best_score and similarity > 0.4:
-                    best_score = similarity
+                if window_similarity > best_score and window_similarity > 0.4:
+                    best_score = window_similarity
                     
-                    # Try to get word-level timestamps if available
+                    # Estimate position
                     if 'words' in segment and i < len(segment['words']):
                         start_word = segment['words'][i]
-                        end_word = segment['words'][min(i+len(target_words)-1, len(segment['words'])-1)]
+                        end_idx = min(i + len(target_words) - 1, len(segment['words']) - 1)
+                        end_word = segment['words'][end_idx]
+                        
                         best_match = {
                             'text': window,
                             'start': start_word['start'],
                             'end': end_word['end'],
-                            'similarity': similarity,
+                            'similarity': window_similarity,
                             'method': 'word_window'
-                        }
-                    else:
-                        # Estimate based on position in segment
-                        segment_duration = segment['end'] - segment['start']
-                        start_offset = (i / len(segment_words)) * segment_duration
-                        end_offset = ((i + len(target_words)) / len(segment_words)) * segment_duration
-                        best_match = {
-                            'text': window,
-                            'start': segment['start'] + start_offset,
-                            'end': segment['start'] + end_offset,
-                            'similarity': similarity,
-                            'method': 'estimated_window'
                         }
         
         return best_match
     
     def extract_audio_clip(self, video_path, start_time, end_time, output_path):
         """
-        Extract audio clip using ffmpeg
+        Extract audio clip using ffmpeg with configured buffers
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        duration = end_time - start_time
+        # Apply buffers
+        buffered_start = max(0, start_time - self.before_buffer)
+        buffered_end = end_time + self.after_buffer
+        
+        duration = buffered_end - buffered_start
+        
+        print(f"     Original: {start_time:.2f}s - {end_time:.2f}s")
+        print(f"     Buffered: {buffered_start:.2f}s - {buffered_end:.2f}s ({duration:.1f}s total)")
         
         cmd = [
             'ffmpeg',
             '-i', str(video_path),
-            '-ss', str(start_time),
+            '-ss', str(buffered_start),
             '-t', str(duration),
             '-vn',
             '-acodec', 'libmp3lame',
@@ -287,7 +262,7 @@ class BMOAutoExtractor:
             print(f"     Cleaned: {self.clean_dialogue_for_matching(dialogue)}")
             
             # Find this dialogue in the transcription
-            match = self.find_dialogue_advanced(dialogue, transcription['segments'])
+            match = self.find_dialogue_in_transcription(dialogue, transcription['segments'])
             
             if match:
                 print(f"    ✅ Found at {match['start']:.2f}s - {match['end']:.2f}s")
@@ -301,20 +276,16 @@ class BMOAutoExtractor:
                 output_filename = f"{episode_name}_BMO_{i+1:03d}_{safe_dialogue}.mp3"
                 output_path = self.output_dir / episode_name / output_filename
                 
-                # Add a small buffer
-                start_time = max(0, match['start'] - 0.3)
-                end_time = match['end'] + 0.3
-                
-                # Extract audio
-                success = self.extract_audio_clip(video_path, start_time, end_time, output_path)
+                # Extract audio with buffers
+                success = self.extract_audio_clip(video_path, match['start'], match['end'], output_path)
                 
                 if success:
                     successful += 1
                     results.append({
                         'episode': episode_name,
                         'dialogue': dialogue,
-                        'start_time': start_time,
-                        'end_time': end_time,
+                        'start_time': match['start'],
+                        'end_time': match['end'],
                         'similarity': match['similarity'],
                         'method': match['method'],
                         'matched_text': match['text'],
@@ -394,6 +365,7 @@ if __name__ == "__main__":
     print(f"Transcripts directory: {transcripts_path}")
     print(f"Videos directory: {videos_path}")
     print(f"Output directory: {output_path}")
+    print(f"Buffer settings: {1.0}s before, {2.0}s after")
     print("="*60)
     
     # Check if directories exist
@@ -407,6 +379,12 @@ if __name__ == "__main__":
         print("Please update the VIDEOS_DIR path")
         exit(1)
     
+    # Check for CUDA
+    if torch.cuda.is_available():
+        print(f"✅ CUDA available - using GPU for faster processing")
+    else:
+        print(f"⚠️  CUDA not available - using CPU (this will be slower)")
+    
     # Get all transcript files
     all_episodes = sorted(list(transcripts_path.glob("*.txt")))
     print(f"\nFound {len(all_episodes)} transcript files")
@@ -415,11 +393,14 @@ if __name__ == "__main__":
     print("\nOptions:")
     print("1. Process all episodes")
     print("2. Test with single episode")
+    print("3. Process a range of episodes")
+    print("4. Search for specific episode")
+    print("5. Adjust buffer settings")
     
-    choice = input("\nSelect option (1 or 2): ").strip()
+    choice = input("\nSelect option (1-5): ").strip()
     
     if choice == "2":
-        # Show all episodes with pagination
+        # Test with single episode - show all with pagination
         page_size = 20
         total_pages = (len(all_episodes) + page_size - 1) // page_size
         current_page = 1
@@ -456,6 +437,53 @@ if __name__ == "__main__":
                     print("❌ Invalid episode number")
             else:
                 print("❌ Invalid input")
+    
+    elif choice == "3":
+        # Process a range of episodes
+        print(f"\nAvailable episodes (1-{len(all_episodes)}):")
+        try:
+            start = int(input("Start episode number: ")) - 1
+            end = int(input("End episode number: ")) - 1
+            
+            if 0 <= start <= end < len(all_episodes):
+                extractor = BMOAutoExtractor(transcripts_path, videos_path, output_path)
+                for i in range(start, end + 1):
+                    extractor.process_episode(all_episodes[i])
+            else:
+                print("❌ Invalid range")
+        except ValueError:
+            print("❌ Please enter valid numbers")
+    
+    elif choice == "4":
+        # Search for specific episode
+        search = input("Enter episode name to search for: ").strip().lower()
+        matches = [ep for ep in all_episodes if search in ep.stem.lower()]
+        
+        if matches:
+            print(f"\nFound {len(matches)} matching episodes:")
+            for i, ep in enumerate(matches):
+                print(f"  {i+1}. {ep.stem}")
+            
+            ep_choice = input("\nEnter number to process: ").strip()
+            try:
+                idx = int(ep_choice) - 1
+                if 0 <= idx < len(matches):
+                    extractor = BMOAutoExtractor(transcripts_path, videos_path, output_path)
+                    extractor.process_episode(matches[idx])
+                else:
+                    print("❌ Invalid number")
+            except ValueError:
+                print("❌ Invalid input")
+        else:
+            print("❌ No matching episodes found")
+    
+    elif choice == "5":
+        # Adjust buffer settings
+        print(f"\nCurrent buffer settings:")
+        print(f"  Before speech: {1.0} seconds")
+        print(f"  After speech: {2.0} seconds")
+        print("\nNote: Buffer settings are hardcoded in the class __init__")
+        print("Edit self.before_buffer and self.after_buffer in the code to change them")
     
     else:
         # Process all episodes
